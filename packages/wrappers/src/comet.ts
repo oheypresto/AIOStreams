@@ -24,7 +24,10 @@ export class Comet extends BaseWrapper {
       url,
       addonId,
       userConfig,
-      indexerTimeout || Settings.DEFAULT_COMET_TIMEOUT
+      indexerTimeout || Settings.DEFAULT_COMET_TIMEOUT,
+      Settings.DEFAULT_COMET_USER_AGENT
+        ? { 'User-Agent': Settings.DEFAULT_COMET_USER_AGENT }
+        : undefined
     );
   }
 
@@ -32,12 +35,23 @@ export class Comet extends BaseWrapper {
     const parsedStream = super.parseStream(stream);
     if (stream.url && parsedStream.type === 'stream') {
       parsedStream.result.filename = stream.description?.split('\n')[0];
-      // force COMET_FORCE_HOSTNAME if provided
-      if (Settings.FORCE_COMET_HOSTNAME) {
+      if (
+        Settings.FORCE_COMET_HOSTNAME !== undefined ||
+        Settings.FORCE_COMET_PORT !== undefined ||
+        Settings.FORCE_COMET_PROTOCOL !== undefined
+      ) {
+        // modify the URL according to settings, needed when using a local URL for requests but a public stream URL is needed.
         const url = new URL(stream.url);
-        url.hostname = Settings.FORCE_COMET_HOSTNAME;
-        url.port = Settings.FORCE_COMET_PORT;
-        url.protocol = Settings.FORCE_COMET_PROTOCOL;
+
+        if (Settings.FORCE_COMET_PROTOCOL !== undefined) {
+          url.protocol = Settings.FORCE_COMET_PROTOCOL;
+        }
+        if (Settings.FORCE_COMET_PORT !== undefined) {
+          url.port = Settings.FORCE_COMET_PORT.toString();
+        }
+        if (Settings.FORCE_COMET_HOSTNAME !== undefined) {
+          url.hostname = Settings.FORCE_COMET_HOSTNAME;
+        }
         parsedStream.result.url = url.toString();
       }
     }

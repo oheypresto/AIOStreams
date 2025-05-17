@@ -23,6 +23,7 @@ import {
   createLogger,
   getTimeTakenSincePoint,
   isValueEncrypted,
+  maskSensitiveInfo,
 } from '@aiostreams/utils';
 
 const logger = createLogger('server');
@@ -48,18 +49,6 @@ Object.entries(Settings).forEach(([key, value]) => {
   }
 });
 
-let CUSTOM_CONFIGS: Record<string, string> = {};
-if (Settings.CUSTOM_CONFIGS) {
-  try {
-    CUSTOM_CONFIGS = JSON.parse(Settings.CUSTOM_CONFIGS);
-    logger.info(
-      `Loaded ${Object.keys(CUSTOM_CONFIGS).length} custom configs under aliases ${Object.keys(CUSTOM_CONFIGS).join(', ')}`
-    );
-  } catch (error: any) {
-    logger.error(`CUSTOM_CONFIGS is not valid JSON: ${error.message}`);
-  }
-}
-
 // attempt to load the secret key
 try {
   if (Settings.SECRET_KEY) loadSecretKey(true);
@@ -73,8 +62,6 @@ try {
     `The secret key is invalid. You will not be able to generate configurations. You can generate a new secret key by running the following command\n${command}`
   );
 }
-
-const cache = new Cache(Settings.MAX_CACHE_SIZE);
 
 // Built-in middleware for parsing JSON
 app.use(express.json());
@@ -93,7 +80,12 @@ app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
     logger.info(
-      `${req.method} ${req.path.replace(/\/ey[JI][\w\=]+/g, '/*******').replace(/\/(E2?|B)?-[\w-\%]+/g, '/*******')} - ${res.statusCode} - ${getTimeTakenSincePoint(start)}`
+      `${req.method} ${req.path
+        .replace(/\/ey[JI][\w\=]+/g, '/*******')
+        .replace(
+          /\/(E2?|B)?-[\w-\%]+/g,
+          '/*******'
+        )} - ${getIp(req) ? maskSensitiveInfo(getIp(req)!) : 'Unknown IP'} - ${res.statusCode} - ${getTimeTakenSincePoint(start)}`
     );
   });
   next();
@@ -132,11 +124,11 @@ app.get('/:config/configure', (req, res) => {
   try {
     let configJson = extractJsonConfig(config);
     let configString = config;
-    if (CUSTOM_CONFIGS) {
+    if (Settings.CUSTOM_CONFIGS) {
       const customConfig = extractCustomConfig(config);
       if (customConfig) {
         configJson = customConfig;
-        configString = decodeURIComponent(CUSTOM_CONFIGS[config]);
+        configString = decodeURIComponent(Settings.CUSTOM_CONFIGS[config]);
       }
     }
     if (isValueEncrypted(configString)) {
@@ -245,12 +237,7 @@ app.get('/:config/stream/:type/:id.json', (req, res: Response): void => {
       );
       return;
     }
-    configJson.requestingIp =
-      req.get('X-Forwarded-For') ||
-      req.get('X-Real-IP') ||
-      req.get('CF-Connecting-IP') ||
-      req.ip;
-    configJson.instanceCache = cache;
+    configJson.requestingIp = getIp(req);
     const aioStreams = new AIOStreams(configJson);
     aioStreams
       .getStreams(streamRequest)
@@ -367,6 +354,18 @@ app.listen(Settings.PORT, () => {
   logger.info(`Listening on port ${Settings.PORT}`);
 });
 
+function getIp(req: Request): string | undefined {
+  return (
+    req.get('X-Client-IP') ||
+    req.get('X-Forwarded-For')?.split(',')[0].trim() ||
+    req.get('X-Real-IP') ||
+    req.get('CF-Connecting-IP') ||
+    req.get('True-Client-IP') ||
+    req.get('X-Forwarded')?.split(',')[0].trim() ||
+    req.get('Forwarded-For')?.split(',')[0].trim() ||
+    req.ip
+  );
+}
 function extractJsonConfig(config: string): Config {
   if (
     config.startsWith('eyJ') ||
@@ -376,7 +375,7 @@ function extractJsonConfig(config: string): Config {
   ) {
     return extractEncryptedOrEncodedConfig(config, 'Config');
   }
-  if (CUSTOM_CONFIGS) {
+  if (Settings.CUSTOM_CONFIGS) {
     const customConfig = extractCustomConfig(config);
     if (customConfig) return customConfig;
   }
@@ -384,7 +383,7 @@ function extractJsonConfig(config: string): Config {
 }
 
 function extractCustomConfig(config: string): Config | undefined {
-  const customConfig = CUSTOM_CONFIGS?.[config];
+  const customConfig = Settings.CUSTOM_CONFIGS[config];
   if (!customConfig) return undefined;
   logger.info(
     `Found custom config for alias ${config}, attempting to extract config`
@@ -466,6 +465,9 @@ function decryptEncryptedInfoFromConfig(config: Config): Config {
   if (config.mediaFlowConfig) {
     decryptMediaFlowConfig(config.mediaFlowConfig);
   }
+  if (config.stremThruConfig) {
+    decryptStremThruConfig(config.stremThruConfig);
+  }
 
   if (config.apiKey) {
     config.apiKey = decryptValue(config.apiKey, 'aioStreams apiKey');
@@ -506,6 +508,16 @@ function decryptMediaFlowConfig(mediaFlowConfig: {
   mediaFlowConfig.publicIp = decryptValue(publicIp, 'MediaFlow publicIp');
 }
 
+function decryptStremThruConfig(
+  stremThruConfig: Config['stremThruConfig']
+): void {
+  if (!stremThruConfig) return;
+  const { url, credential, publicIp } = stremThruConfig;
+  stremThruConfig.url = decryptValue(url, 'StremThru url');
+  stremThruConfig.credential = decryptValue(credential, 'StremThru credential');
+  stremThruConfig.publicIp = decryptValue(publicIp, 'StremThru publicIp');
+}
+
 function encryptInfoInConfig(config: Config): Config {
   if (config.services) {
     config.services.forEach(
@@ -524,7 +536,13 @@ function encryptInfoInConfig(config: Config): Config {
     encryptMediaFlowConfig(config.mediaFlowConfig);
   }
 
+  if (config.stremThruConfig) {
+    encryptStremThruConfig(config.stremThruConfig);
+  }
+
   if (config.apiKey) {
+    // we can either remove the api key for better security or encrypt it for usability
+    // removing it means the user has to enter it every time upon reconfiguration.
     config.apiKey = encryptValue(config.apiKey, 'aioStreams apiKey');
   }
 
@@ -565,6 +583,16 @@ function encryptMediaFlowConfig(mediaFlowConfig: {
   );
   mediaFlowConfig.proxyUrl = encryptValue(proxyUrl, 'MediaFlow proxyUrl');
   mediaFlowConfig.publicIp = encryptValue(publicIp, 'MediaFlow publicIp');
+}
+
+function encryptStremThruConfig(
+  stremThruConfig: Config['stremThruConfig']
+): void {
+  if (!stremThruConfig) return;
+  const { url, credential, publicIp } = stremThruConfig;
+  stremThruConfig.url = encryptValue(url, 'StremThru url');
+  stremThruConfig.credential = encryptValue(credential, 'StremThru credential');
+  stremThruConfig.publicIp = encryptValue(publicIp, 'StremThru publicIp');
 }
 
 function processObjectValues(
